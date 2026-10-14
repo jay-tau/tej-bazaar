@@ -16,7 +16,8 @@ from typing import Any
 
 import requests
 
-from pipeline.actions.fetch import ActionsFetchError, _BSE_HEADERS
+from pipeline.actions import fetch as _fetch
+from pipeline.actions.fetch import HTTP_ERRORS, ActionsFetchError, _BSE_HEADERS
 
 BSE_SCRIP_MASTER_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w"
@@ -41,7 +42,7 @@ def fetch_bse_scrip_master(
     if cached.exists() and not refresh:
         return json.loads(cached.read_text())
 
-    sess = session or requests.Session()
+    sess = session or _fetch.bse_session()
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
@@ -59,7 +60,7 @@ def fetch_bse_scrip_master(
             raise ActionsFetchError(
                 f"non-JSON response from {BSE_SCRIP_MASTER_URL}: {exc}"
             ) from exc
-        except requests.RequestException as exc:
+        except HTTP_ERRORS as exc:
             last_exc = exc
             if attempt < retries:
                 time.sleep(backoff_seconds * (2 ** (attempt - 1)))

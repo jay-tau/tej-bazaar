@@ -186,6 +186,32 @@ def test_actions_fetch_propagates_fetch_error(tmp_path: Path):
     assert result.exit_code != 0
 
 
+def test_actions_fetch_keeps_nse_when_bse_fails(tmp_path: Path):
+    from pipeline.actions import ActionsFetchError
+
+    raw = [
+        {"symbol": "X", "series": "EQ", "subject": "Bonus 1:1",
+         "exDate": "01-Feb-2024", "recDate": "01-Feb-2024",
+         "comp": "X Ltd", "isin": "INE000A00001"},
+    ]
+    out = tmp_path / "out"
+    with patch("pipeline.cli.fetch_nse_actions", return_value=raw), \
+         patch("pipeline.cli.fetch_bse_actions", side_effect=ActionsFetchError("403")), \
+         patch("pipeline.cli.load_bse_scrip_to_isin", return_value={}):
+        result = runner.invoke(
+            app,
+            ["actions", "fetch",
+             "--from", "2024-02-01", "--to", "2024-02-29",
+             "--exchange", "both",
+             "--cache-dir", str(tmp_path / "cache"),
+             "--out-dir", str(out)],
+        )
+    assert result.exit_code == 0, result.stdout
+    assert "::warning::BSE" in result.stdout
+    assert (out / "nse_20240201_20240229.parquet").exists()
+    assert not (out / "bse_20240201_20240229.parquet").exists()
+
+
 def test_help_lists_actions_group():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

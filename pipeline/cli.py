@@ -608,6 +608,7 @@ def actions_fetch(
     summary.add_column("ISIN match", justify="right")
     summary.add_column("Output", style="dim")
 
+    failed: list[str] = []
     for ex in exchanges:
         try:
             if ex == "NSE":
@@ -616,7 +617,9 @@ def actions_fetch(
                 raw = fetch_bse_actions(start, end, cache_dir)
         except ActionsFetchError as e:
             console.print(f"[red]error[/red] {ex}: {e}")
-            raise typer.Exit(code=1) from e
+            print(f"::warning::{ex} corp-actions fetch failed, keeping previous {ex} actions")
+            failed.append(ex)
+            continue
 
         actions = parse_actions(raw, ex, scrip_to_isin=bse_scrip_map if ex == "BSE" else None)
         df = actions_to_polars(actions)
@@ -627,6 +630,8 @@ def actions_fetch(
                         f"{with_isin}/{df.height}", str(out_path))
 
     console.print(summary)
+    if len(failed) == len(exchanges):
+        raise typer.Exit(code=1)
 
 
 @actions_app.command("reparse")

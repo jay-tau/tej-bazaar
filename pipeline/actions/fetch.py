@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import requests
+from curl_cffi import requests as cffi_requests
 
 Exchange = Literal["NSE", "BSE"]
 
@@ -54,6 +55,14 @@ _BSE_HEADERS = {
     "Referer": "https://www.bseindia.com/",
     "Origin": "https://www.bseindia.com",
 }
+
+
+HTTP_ERRORS = (requests.RequestException, cffi_requests.exceptions.RequestException)
+
+
+def bse_session() -> cffi_requests.Session:
+    """BSE's API sits behind Akamai bot checks that reject non-browser TLS."""
+    return cffi_requests.Session(impersonate="chrome")
 
 
 class ActionsFetchError(RuntimeError):
@@ -140,7 +149,7 @@ def fetch_bse_actions(
         tdate=to_date.strftime("%Y%m%d"),
     )
     body = _http_get_with_retry(
-        url, _BSE_HEADERS, retries, backoff_seconds, timeout, session,
+        url, _BSE_HEADERS, retries, backoff_seconds, timeout, session or bse_session(),
     )
     records = _parse_json_list(body, url)
     cached.write_text(json.dumps(records))
@@ -198,7 +207,7 @@ def _http_get_with_retry(
             resp = sess.get(url, headers=headers, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp.content
-        except requests.RequestException as exc:
+        except HTTP_ERRORS as exc:
             last_exc = exc
             if attempt < retries:
                 time.sleep(backoff_seconds * (2 ** (attempt - 1)))
