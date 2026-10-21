@@ -180,26 +180,36 @@ def resolve_isin_via_symbol_history(
     #  - Dividend / bonus on a stable ISIN: the active interval starts long
     #    before ex_date; we pick that interval's ISIN (== current ISIN).
     #  - Split with face-value change: the ISIN flips on ex_date itself, so
-    #    the new interval has valid_from == ex_date. The `<` filter skips
+    #    the new interval has valid_from == ex_date. The strict `<` skips
     #    that brand-new interval and reaches back to the prior one. The
     #    factor then attaches to the OLD ISIN, which carries the long
     #    pre-event price history.
-    new_isins: list[str | None] = []
-    for row in actions.iter_rows(named=True):
-        sym = row["symbol"]
-        ex = row["ex_date"]
-        sym_intervals = history.filter(
-            (pl.col("symbol") == sym) & (pl.col("valid_from") < ex)
-        ).sort("valid_from", descending=True)
-        if sym_intervals.height > 0:
-            new_isins.append(sym_intervals["isin"][0])
-        else:
-            # No prior interval (action precedes our price coverage). Keep
-            # the original ISIN; if it doesn't match anything, the join in
-            # compute_action_factors will simply drop the row.
-            new_isins.append(row.get("isin"))
-
-    return actions.with_columns(isin=pl.Series(new_isins, dtype=pl.Utf8))
+    #
+    # One as-of join by symbol finds the latest interval starting before
+    # ex_date. As in compute_action_factors, "strictly before" is a backward
+    # join on ex_date minus one day.
+    intervals = history.select(
+        "symbol", "valid_from", _resolved_isin=pl.col("isin")
+    ).sort(["symbol", "valid_from"])
+    resolved = (
+        actions.with_row_index("_row")
+        .with_columns(_join_key=pl.col("ex_date") - pl.duration(days=1))
+        .sort(["symbol", "_join_key"])
+        .join_asof(
+            intervals,
+            left_on="_join_key",
+            right_on="valid_from",
+            by="symbol",
+            strategy="backward",
+        )
+        .sort("_row")
+    )
+    # No prior interval (action precedes our price coverage): keep the
+    # original ISIN; if it doesn't match anything, the join in
+    # compute_action_factors will simply drop the row.
+    return actions.with_columns(
+        isin=resolved.select(pl.coalesce("_resolved_isin", "isin").cast(pl.Utf8)).to_series()
+    )
 
 
 def _row_to_action(row: dict) -> CorporateAction:
