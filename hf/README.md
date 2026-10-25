@@ -1,5 +1,7 @@
 ---
-license: mit
+license: other
+license_name: exchange-public-data
+license_link: https://github.com/tejhq/tej-bazaar#license
 pretty_name: TejHQ Indian Markets
 language:
   - en
@@ -202,8 +204,8 @@ No key needed for prices, snapshots, actions and the pipeline status at `/v1/sta
 
 ## Source and license
 
-- **Source:** NSE and BSE official EOD bhavcopy and corporate action feeds. Public, free, redistributable.
+- **Source:** NSE and BSE official EOD bhavcopy and corporate action feeds, published publicly by the exchanges.
 - **Pipeline:** [github.com/tejhq/tej-bazaar](https://github.com/tejhq/tej-bazaar), MIT. Every tree here is reproducible from it.
-- **Data:** Exchange-published. Redistribution as cleaned parquet is permitted. Verify exchange terms before commercial use.
+- **Data:** The MIT licence covers the code, not the data. The data is derived from exchange-published files and TejHQ holds no exchange licence, so it cannot grant rights on the exchanges' behalf. Free for personal and research use; check NSE and BSE terms before redistribution or commercial use.
 
 Part of [TejHQ](https://tejhq.dev): open, free, end-of-day market data for India. Build log on the [blog](https://tejhq.dev/blog).

@@ -346,7 +346,7 @@ PRs welcome. If you find data quality issues, missing stocks, or holiday gaps, o
 
 Code: **MIT** (see [LICENSE](./LICENSE)).
 
-Data: NSE/BSE Bhavcopy is published openly by the exchanges; redistribution as cleaned Parquet is permitted. Always verify exchange terms before commercial use.
+Data: derived from NSE/BSE bhavcopy and corporate action files that the exchanges publish openly. The MIT licence does not cover the data, and TejHQ holds no exchange licence, so it cannot grant rights on the exchanges' behalf. Free for personal and research use; check NSE and BSE terms before redistribution or commercial use.
 
 ---
 
