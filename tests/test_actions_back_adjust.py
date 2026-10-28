@@ -348,6 +348,35 @@ def test_resolve_isin_no_op_for_correctly_keyed_action():
     assert resolved["isin"].to_list() == ["INE002A01018"]
 
 
+def test_resolve_isin_resolves_each_row_in_input_order():
+    # Several symbols and ex_dates, deliberately unsorted. Each row resolves
+    # against its own symbol's intervals and comes back in its input slot.
+    def act(symbol: str, isin: str, ex_date: date) -> CorporateAction:
+        return CorporateAction(
+            exchange="NSE", symbol=symbol, isin=isin, company=symbol,
+            ex_date=ex_date, record_date=None, type="dividend", cash_amount=1.0,
+        )
+
+    actions = to_polars([
+        act("KOTAKBANK", "STALE", date(2026, 2, 1)),     # after the split: new ISIN
+        act("HDFCBANK", "INE040A01018", date(2025, 8, 26)),
+        act("KOTAKBANK", "STALE", date(2026, 1, 14)),    # split day: prior ISIN
+        act("NOPRICES", "INEORIG", date(2024, 6, 1)),
+        act("KOTAKBANK", "STALE", date(2024, 1, 2)),     # first trading day: no prior interval
+    ])
+    prices = _prices_full([
+        ("HDFCBANK", "INE040A01034", date(2024, 1, 2)),
+        ("KOTAKBANK", "INE237A01028", date(2024, 1, 2)),
+        ("KOTAKBANK", "INE237A01028", date(2026, 1, 13)),
+        ("KOTAKBANK", "INE237A01036", date(2026, 1, 14)),
+    ])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    assert resolved["isin"].to_list() == [
+        "INE237A01036", "INE040A01034", "INE237A01028", "INEORIG", "STALE",
+    ]
+    assert resolved.drop("isin").equals(actions.drop("isin"))
+
+
 def test_resolve_isin_empty_actions_returns_unchanged():
     actions = to_polars([])
     prices = _prices_full([("X", "INEX", date(2024, 1, 1))])
