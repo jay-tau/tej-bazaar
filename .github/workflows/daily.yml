@@ -66,13 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: '3.11'
-          cache: pip
+          enable-cache: false
+          activate-environment: true
 
       - name: Install pipeline
-        run: pip install -e .
+        run: uv sync --locked
 
       - name: Resolve the range to sweep
         # A scheduled run sweeps the last `lookback` calendar days, not one
@@ -282,13 +283,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: '3.11'
-          cache: pip
+          enable-cache: false
+          activate-environment: true
 
       - name: Install pipeline
-        run: pip install -e .
+        run: uv sync --locked
 
       - name: Pull price + actions history from R2
         # Inputs only, into data/out. Includes today's row because the
