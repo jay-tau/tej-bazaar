@@ -12,10 +12,10 @@ Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
 **tej-bazaar** ingests end-of-day OHLCV data for NSE and BSE listed instruments straight from the exchanges' official Bhavcopy, normalizes it, and publishes it as partitioned Parquet on HuggingFace.
 
-- **Source:** NSE/BSE Bhavcopy (official, free, no auth, redistributable)
+- **Source:** NSE/BSE Bhavcopy (official, free, no auth)
 - **Format:** Polars-friendly Parquet, Hive-partitioned by date
 - **Latency:** End-of-day, published by 20:30 IST on trading days
-- **License:** Code MIT. Data is exchange-published Bhavcopy, free to redistribute.
+- **License:** Code MIT. Data is exchange-published Bhavcopy, not covered by MIT. See [License](#license).
 
 This repo is the **ingest pipeline**. [`tej-api`](../tej-api) serves the same parquet over REST at `api.tejhq.dev`.
 
