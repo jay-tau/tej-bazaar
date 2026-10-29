@@ -6,7 +6,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "polars>=1.0",
+    "polars>=1.21",
     "requests>=2.32",
     "exchange-calendars>=4.5",
     "huggingface-hub>=0.24",
