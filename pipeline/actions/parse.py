@@ -27,11 +27,26 @@ _NSE_NON_EQUITY_SERIES: frozenset[str] = frozenset({
 # Money amount: matches "Rs 8", "Re 0.50", "Rs.10", "Rs. - 0.0100"
 _RE_MONEY = re.compile(r"(?:Re?s?\.?)\s*-?\s*(\d+(?:\.\d+)?)", re.I)
 
-# Bonus ratio: "Bonus 3:1" or "Bonus issue 1:50"
-_RE_BONUS = re.compile(r"bonus(?:\s+issue)?\s+(\d+)\s*:\s*(\d+)", re.I)
+# Bonus ratio: "Bonus 3:1", "Bonus issue 1:50", "Bonus - 3:1", "Bonus- 1:2",
+# "Bonus Shares In The Ratio Of 1:1". Only these words may come between, so another action's ratio
+# ("Bonus And Rights 1:2") is never read as the bonus's.
+_RE_BONUS = re.compile(
+    r"\bbonus\b(?:\s+issue|\s+shares\s+in\s+the\s+ratio\s+of)?\s*-?\s*(\d+)\s*:\s*(\d+)", re.I
+)
 
-# The exchange also writes a bonus as "Bon 1:1" when it shares a line with a split.
-_RE_BONUS_SHORT = re.compile(r"\bbon\s*(\d+)\s*:\s*(\d+)", re.I)
+# The exchange also writes a bonus as "Bon 1:1" or "Bon-2:1" when it shares a line with a split.
+_RE_BONUS_SHORT = re.compile(r"\bbon\s*-?\s*(\d+)\s*:\s*(\d+)", re.I)
+
+# An instrument other than equity: "Bonus Ncrps 4:1", "Bonus Debentures 6:1", "Bonus Deb1:1",
+# "Bonus Preference Shares 21:1", "Bonus 1 Dvr : 10 Eq Share". Holders of such a bonus get the
+# instrument and keep their equity shares. A line naming one takes no equity bonus ratio, even if an
+# equity bonus could share the line: a wrong equity factor rescales years of history, a missing one
+# leaves the step visible as before.
+_RE_NON_EQUITY = re.compile(
+    r"\b(?:(?:debentures?|ncds?|bonds?|ncrps|ccps|ocps|rps|preference|pref|dvrs?|warrants?)\b"
+    r"|deb(?=\d)|differential\s+voting)",
+    re.I,
+)
 
 # Rights ratio: "Rights 6:179", "Right 1:10"
 _RE_RIGHTS = re.compile(r"rights?\s+(\d+)\s*:\s*(\d+)", re.I)
@@ -40,13 +55,14 @@ _RE_RIGHTS = re.compile(r"rights?\s+(\d+)\s*:\s*(\d+)", re.I)
 #   "From Rs10/- Per Share To Rs 5/- Per Share"   "From Rs.10/- to Rs.1/-"
 #   "Face Value Split Rs 10 To Re 1"              "Fv Splt Frm Rs 10 To Rs 2"
 #   "Fv Spl-Rs10tore1/Div-3"                      "Bon 1:1/Fv Spl Rs.10tors.5"
+#   "From Rs 10/- Per To Rs 2/- Per Share"        "From 10/- To Face Value 2/-"
 # The old pattern required a literal "from" and left 44 rows without a ratio, which silently became
-# a factor of 1.0 and left prices unadjusted across the split.
+# a factor of 1.0 and left prices unadjusted across the split. A face value needs a currency marker
+# unless "from" or "face value" introduces it.
 _RE_SPLIT_FACE = re.compile(
-    r"(?:from|frm)?\s*"
-    r"(?:re?s?\.?)\s*(\d+(?:\.\d+)?)\s*(?:/-)?\s*"
-    r"(?:per\s+(?:share|unit)s?\s*)?(?:each\s*)?"
-    r"to\s*(?:re?s?\.?)\s*(\d+(?:\.\d+)?)",
+    r"(?:(?:from|frm)\s*(?:re?s?\.?)?|re?s?\.?)\s*(\d+(?:\.\d+)?)\s*(?:/-)?\s*"
+    r"(?:per\b\s*(?:(?:share|unit)s?\s*)?)?(?:each\s*)?"
+    r"to\s*(?:face\s+value\s*(?:re?s?\.?)?|re?s?\.?)\s*(\d+(?:\.\d+)?)",
     re.I,
 )
 
@@ -76,7 +92,7 @@ def _classify(text: str) -> ActionType:
         or re.search(r"\bfv\s*spl", t)
         or "sub-division" in t
         or "subdivision" in t
-        or "consolidation of shares" in t
+        or re.search(r"consolidation of (?:equity )?shares", t)
         or "share consolidation" in t
     ):
         return "split"
@@ -97,14 +113,22 @@ def _classify(text: str) -> ActionType:
     return "other"
 
 
+def _bonus_ratio(text: str) -> tuple[int | None, int | None]:
+    """Equity bonus ratio, or none when the line names another instrument (`_RE_NON_EQUITY`)."""
+    if _RE_NON_EQUITY.search(text):
+        return None, None
+    m = _RE_BONUS.search(text) or _RE_BONUS_SHORT.search(text)
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+
 def _extract_details(
     action_type: ActionType, text: str
 ) -> tuple[int | None, int | None, float | None, float | None, float | None]:
     """Return (ratio_num, ratio_den, cash_amount, fv_from, fv_to)."""
     if action_type == "bonus":
-        m = _RE_BONUS.search(text)
-        if m:
-            return int(m.group(1)), int(m.group(2)), None, None, None
+        num, den = _bonus_ratio(text)
+        if num is not None:
+            return num, den, None, None, None
     elif action_type == "rights":
         m = _RE_RIGHTS.search(text)
         if m:
@@ -114,8 +138,7 @@ def _extract_details(
         if m:
             # Some rows carry both in one line: "Bonus 1:1 And Face Value Split Rs.10/- To Rs.5/-".
             # Keep the bonus ratio too so the factor can apply both.
-            b = _RE_BONUS.search(text) or _RE_BONUS_SHORT.search(text)
-            num, den = (int(b.group(1)), int(b.group(2))) if b else (None, None)
+            num, den = _bonus_ratio(text)
             return num, den, None, float(m.group(1)), float(m.group(2))
     elif action_type == "dividend":
         cash = dividend_cash(text)
