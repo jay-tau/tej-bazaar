@@ -1515,9 +1515,9 @@ reconcile = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.34" },
-    { name = "curl-cffi", specifier = ">=0.7" },
-    { name = "exchange-calendars", specifier = ">=4.5" },
-    { name = "huggingface-hub", specifier = ">=0.24" },
+    { name = "curl-cffi", specifier = ">=0.7.3" },
+    { name = "exchange-calendars", specifier = ">=4.13" },
+    { name = "huggingface-hub", specifier = ">=0.25" },
     { name = "polars", specifier = ">=1.21" },
     { name = "pyarrow", specifier = ">=16.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1526,7 +1526,7 @@ requires-dist = [
     { name = "responses", marker = "extra == 'dev'", specifier = ">=0.25" },
     { name = "rich", specifier = ">=13.7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
-    { name = "typer", specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.15.4" },
     { name = "yfinance", marker = "extra == 'reconcile'", specifier = ">=0.2" },
 ]
 provides-extras = ["dev", "reconcile"]
