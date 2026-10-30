@@ -732,6 +732,42 @@ def test_actions_reparse_recomputes_from_subject(tmp_path: Path):
     assert r.exit_code == 0 and "0" in r.stdout
 
 
+def test_actions_reparse_writes_a_file_whose_only_change_fills_a_null(tmp_path: Path):
+    # A ratio stored as None that now parses is a change. Comparing with != gives null for it, so a
+    # file whose only changes were of this kind was never rewritten.
+    adir = tmp_path / "actions"
+    adir.mkdir()
+    pl.DataFrame(
+        {
+            "exchange": ["NSE"],
+            "symbol": ["X"],
+            "isin": ["I1"],
+            "company": ["X"],
+            "ex_date": [date(2022, 6, 22)],
+            "record_date": [None],
+            "type": ["bonus"],
+            "ratio_num": [None],
+            "ratio_den": [None],
+            "cash_amount": [None],
+            "face_value_from": [None],
+            "face_value_to": [None],
+            "raw_subject": ["Bonus 1:2"],
+        },
+        schema_overrides={
+            "ratio_num": pl.Int64,
+            "ratio_den": pl.Int64,
+            "record_date": pl.Date,
+            "cash_amount": pl.Float64,
+            "face_value_from": pl.Float64,
+            "face_value_to": pl.Float64,
+        },
+    ).write_parquet(adir / "nse_2022.parquet")
+    r = runner.invoke(app, ["actions", "reparse", "--actions-dir", str(adir)])
+    assert r.exit_code == 0, r.stdout
+    out = pl.read_parquet(adir / "nse_2022.parquet")
+    assert (out["ratio_num"].to_list(), out["ratio_den"].to_list()) == ([1], [2])
+
+
 def _adjusted(tmp: Path, ex: str, sym: str, cliff: bool) -> None:
     """Write one exchange's adjusted prices, optionally with an unexplained 10:1 step."""
     rows = []

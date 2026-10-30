@@ -374,7 +374,10 @@ SPLIT_SHAPES = [
     ("Fv Spl-Rs10tore1/Div-3", 10.0, 1.0),
     ("Face Value Split Rs.10/- To Rs.1/-", 10.0, 1.0),
     ("Face Value Split(Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share", 10.0, 2.0),
+    ("Face Valus Split (Sub-Division) - From Rs 10/- Per To Rs 2/- Per Share", 10.0, 2.0),
+    ("Bonus 1:1 / Face Value Split From 10/- To Face Value 2/-", 10.0, 2.0),
     ("Consolidation of Shares From Re 1 To Rs 10", 1.0, 10.0),
+    ("Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share", 1.0, 10.0),
 ]
 
 
@@ -391,6 +394,72 @@ def test_a_row_carrying_both_a_bonus_and_a_split_keeps_both():
         num, den, _, fv_from, fv_to = _extract_details("split", text)
         assert (fv_from, fv_to) == (10.0, 5.0)
         assert (num, den) == (1, 1)
+
+
+# The exchange puts a dash or a few words between "bonus" and the ratio. These rows all used to
+# parse without a ratio, so the bonus got a factor of 1.0 and the adjusted series kept the drop.
+BONUS_SHAPES = [
+    ("Bonus - 3:1", 3, 1),
+    ("Bonus- 1:2", 1, 2),
+    ("Bonus Shares In The Ratio Of 1:1", 1, 1),
+    ("Annual General Meeting / Dividend - Rs 3/- Per Share / Bonus - 1:2", 1, 2),
+]
+
+
+@pytest.mark.parametrize("text,num,den", BONUS_SHAPES)
+def test_bonus_shapes_all_carry_a_ratio(text, num, den):
+    assert _classify(text) == "bonus"
+    assert _extract_details("bonus", text)[:2] == (num, den)
+
+
+@pytest.mark.parametrize(
+    "text,num,den,fv_from,fv_to",
+    [
+        ("Bonus - 1:1 And Face Value Split From Rs. 10 To Rs. 2", 1, 1, 10.0, 2.0),
+        ("Fv Spl-Rs10tors5/Bon-2:1", 2, 1, 10.0, 5.0),
+        ("Bonus 1:1 / Face Value Split From 10/- To Face Value 2/-", 1, 1, 10.0, 2.0),
+    ],
+)
+def test_a_split_row_keeps_a_bonus_written_with_a_dash(text, num, den, fv_from, fv_to):
+    assert _classify(text) == "split"
+    got_num, got_den, _, got_from, got_to = _extract_details("split", text)
+    assert (got_num, got_den, got_from, got_to) == (num, den, fv_from, fv_to)
+
+
+def test_a_bonus_ratio_is_never_read_from_another_action():
+    for text in ("Bonus And Rights 1:2", "Bonus Not Declared; Rights 1:2"):
+        assert _extract_details("bonus", text)[:2] == (None, None)
+
+
+# A bonus of debentures, NCRPS, preference or DVR shares hands holders a new instrument and leaves
+# their equity shares alone. It must never take an equity bonus ratio. The first eight are from the
+# feed; the last four are made up, with the instrument where the bonus pattern alone would read a
+# ratio.
+NON_EQUITY_BONUSES = [
+    "Scheme Of Arrangement - Bonus Ncrps 4:1",
+    "Bonus Ncrps 1:116",
+    "Scheme Of Arrangement - Bonus Debentures 6:1",
+    "Sch Of Agmt- Bonus Deb1:1",
+    "Scheme Of Arangement- Bonus - 1 Debenture For 1 Equity Share Held",
+    "Annual General Meeting/Dividend Rs.3/- Per Share/Scheme Of Arrangement - Bonus Debentures 1:1 (Purpose Revised)",
+    "Bonus Preference Shares 21:1",
+    "Bonus 1 Dvr : 10 Eq Share",
+    "Bonus Shares In The Ratio Of 1:1 (NCRPS)",
+    "Bonus - 1:10 Differential Voting Rights Shares",
+    "NCRPS Bonus - 4:1",
+    "Issue Of Debentures As Bonus - 6:1",
+]
+
+
+@pytest.mark.parametrize("text", NON_EQUITY_BONUSES)
+def test_a_bonus_of_another_instrument_takes_no_equity_ratio(text):
+    assert _extract_details(_classify(text), text)[:2] == (None, None)
+
+
+def test_a_line_naming_another_instrument_takes_no_equity_ratio_at_all():
+    # By design: no line in the feed has both, and leaving a step unadjusted is safer than applying
+    # an equity factor that may belong to the debentures.
+    assert _extract_details("bonus", "Bonus 1:2 / Interest On Debentures")[:2] == (None, None)
 
 
 def test_dividends_mentioning_a_face_value_are_still_dividends():

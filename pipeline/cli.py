@@ -686,11 +686,10 @@ def actions_reparse(
             pl.Series("face_value_to", fvt, dtype=pl.Float64),
         )
         cols = ["type", "ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
+        # ne_missing, not !=: != gives null when either side is None, the sum counted that as no
+        # change, and a file whose only changes filled or cleared a None was never rewritten.
         changed = int(
-            (df.select(cols).with_row_index() != new.select(cols).with_row_index())
-            .select(pl.any_horizontal(pl.all().exclude("index")))
-            .sum()
-            .item()
+            pl.select(pl.any_horizontal([new[c].ne_missing(df[c]) for c in cols])).to_series().sum()
         )
         if changed:
             new.write_parquet(path)
