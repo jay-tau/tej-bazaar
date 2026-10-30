@@ -3,6 +3,7 @@
 Commands:
     tej-bazaar fetch DATE [--exchange NSE|BSE|both]
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
+    tej-bazaar delivery backfill --from D --to D [--sleep SECONDS]
     tej-bazaar info [--data-dir PATH]
     tej-bazaar actions fetch (--year YYYY | --from D --to D) [--exchange NSE|BSE|both]
     tej-bazaar actions adjust (--year YYYY | --all-years) [--exchange NSE|BSE|both]
@@ -47,6 +48,7 @@ from pipeline.actions import (
     resolve_isin_via_symbol_history,
     to_polars as actions_to_polars,
 )
+from pipeline.delivery import fetch_nse_delivery, parse_mto
 from pipeline.fetch import (
     BhavcopyFetchError,
     BhavcopyNotFoundError,
@@ -79,6 +81,7 @@ DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
 DEFAULT_SYMBOL_HISTORY_DIR = Path("data/out/symbol_history")
 DEFAULT_METRICS_DIR = Path("data/out/metrics")
 DEFAULT_UNIVERSE_DIR = Path("data/out/universe")
+DEFAULT_DELIVERY_OUT_DIR = Path("data/out/delivery")
 
 
 class ExchangeChoice(str, Enum):
@@ -388,6 +391,13 @@ def check_sessions(
         Optional[str],
         typer.Option("--now", help="Override the current IST time, YYYY-MM-DDTHH:MM, for tests"),
     ] = None,
+    grace: Annotated[
+        int,
+        typer.Option(
+            "--grace",
+            help="Trading days a session may stay missing past its due hour with only a warning",
+        ),
+    ] = 0,
 ) -> None:
     """Fail if a trading session in the range is missing past its due hour.
 
@@ -397,6 +407,11 @@ def check_sessions(
     a real failure worth an alert. Nothing here reads the wall-clock date to
     decide what should exist, which is what let two sessions go missing behind
     a green run.
+
+    With `--grace N` a missing session only emits a `::warning::` until the
+    due hour N trading days later, then fails. The delivery job uses this: a
+    late MTO file must not fail the run, but a source that stays broken must.
+    Days inside a year rollup count as present, as do daily files.
     """
     _banner()
     start = _parse_date(from_date)
@@ -405,10 +420,7 @@ def check_sessions(
         raise typer.BadParameter("--to must be on or after --from")
 
     at = datetime.strptime(now, "%Y-%m-%dT%H:%M") if now else datetime.now(IST).replace(tzinfo=None)
-    have = {
-        _date_from_path(p)
-        for p in prices_dir.rglob("date=*.parquet")
-    } if prices_dir.exists() else set()
+    have = _dates_on_disk(prices_dir)
     already = _parse_date(published) if published else None
 
     sessions = holidays.trading_days_between(start, end, "NSE")
@@ -416,6 +428,7 @@ def check_sessions(
     table.add_column("Session", style="bold")
     table.add_column("Bhavcopy")
     late: list[date] = []
+    waiting: list[tuple[date, date]] = []
     for d in sessions:
         if d in have:
             table.add_row(d.isoformat(), "[green]fetched[/green]")
@@ -423,15 +436,25 @@ def check_sessions(
         if already and d <= already:
             table.add_row(d.isoformat(), "[green]published[/green]")
             continue
-        if at >= datetime.combine(d, datetime.min.time()).replace(hour=due_hour):
+        fails_on = d
+        if grace:
+            # The grace-th session after d; a week per session is ample.
+            fails_on = _nse_days(d + timedelta(days=1), d + timedelta(days=7 * grace))[grace - 1]
+        if at >= datetime.combine(fails_on, datetime.min.time()).replace(hour=due_hour):
             table.add_row(d.isoformat(), "[red]missing, past due[/red]")
             late.append(d)
+        elif at >= datetime.combine(d, datetime.min.time()).replace(hour=due_hour):
+            table.add_row(d.isoformat(), f"[yellow]missing, fails from {fails_on}[/yellow]")
+            waiting.append((d, fails_on))
         else:
             table.add_row(d.isoformat(), "[yellow]not published yet[/yellow]")
     if not sessions:
         table.add_row("none", "no trading day in range")
     console.print(table)
 
+    for d, fails_on in waiting:
+        print(f"::warning::{d} missing under {prices_dir}; "
+              f"fails if still missing at {due_hour}:00 IST on {fails_on}")
     if late:
         days = ", ".join(d.isoformat() for d in late)
         console.print(f"[red]missing past due:[/red] {days}")
@@ -527,6 +550,106 @@ def publish(
     elif result.commit_url:
         body += f"\n[dim]commit: {result.commit_url}[/dim]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
+
+
+delivery_app = typer.Typer(
+    name="delivery",
+    help="NSE delivery quantity and delivery % per security, from the MTO file.",
+    no_args_is_help=True,
+)
+app.add_typer(delivery_app)
+
+
+@delivery_app.command("backfill")
+def delivery_backfill(
+    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    raw_dir: Annotated[Path, typer.Option("--raw-dir")] = DEFAULT_RAW_DIR,
+    out_dir: Annotated[Path, typer.Option("--out-dir")] = DEFAULT_DELIVERY_OUT_DIR,
+    prices_dir: Annotated[
+        Path,
+        typer.Option(
+            "--prices-dir",
+            help="Root of partitioned bhavcopy parquet; every date `nse/` has is fetched too",
+        ),
+    ] = DEFAULT_OUT_DIR,
+    skip_existing: Annotated[
+        bool,
+        typer.Option(
+            "--skip-existing/--overwrite",
+            help="Skip dates whose parquet already exists",
+        ),
+    ] = True,
+    sleep_between: Annotated[
+        float,
+        typer.Option("--sleep", help="Seconds to wait between downloads (politeness to NSE archives)"),
+    ] = 1.0,
+) -> None:
+    """Fetch NSE delivery positions over a date range into `<out-dir>/nse/`.
+
+    Works like `backfill`: non-trading days are skipped, a 404 (not published
+    yet) counts as skipped, and no per-day failure stops the loop or fails the
+    command. The days are the NSE calendar's sessions plus every date that
+    `<prices-dir>/nse/` has, because the calendar misses special weekend
+    sessions such as 2024-01-20. 2010 to 2026 is about 4,150 files, roughly
+    90 minutes at the default `--sleep`.
+    """
+    _banner()
+    start = _parse_date(from_date)
+    end = _parse_date(to_date)
+    if end < start:
+        raise typer.BadParameter("--to must be on or after --from")
+
+    priced = {d for d in _dates_on_disk(prices_dir / "nse") if start <= d <= end}
+    sessions = sorted(set(_nse_days(start, end)) | priced)
+    console.print(
+        f"[bold]{len(sessions)}[/bold] trading days in [cyan]{start}[/cyan] → [cyan]{end}[/cyan]"
+    )
+
+    counts = {"ok": 0, "skipped": 0, "failed": 0}
+    attempted = 0
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("delivery", total=len(sessions))
+        for d in sessions:
+            if skip_existing and partition_path(out_dir, "NSE", d).exists():
+                counts["skipped"] += 1
+                progress.update(task, advance=1, description=f"[dim]skip[/dim]    NSE {d}")
+                continue
+            # Only a download waits; a cached file needs no request.
+            if not (raw_dir / "nse" / f"MTO_{d:%d%m%Y}.DAT").exists():
+                if attempted:
+                    time.sleep(sleep_between)
+                attempted += 1
+            progress.update(task, description=f"[cyan]NSE[/cyan] delivery {d}")
+            try:
+                df = parse_mto(fetch_nse_delivery(d, raw_dir / "nse"), d)
+                write_partitioned(df, out_dir, "NSE")
+                counts["ok"] += 1
+            except BhavcopyNotFoundError as e:
+                counts["skipped"] += 1
+                console.print(f"  [yellow]missing[/yellow] NSE {d}: {e}")
+            except BhavcopyFetchError as e:
+                counts["failed"] += 1
+                console.print(f"  [red]fail[/red] NSE {d}: {e}")
+            except Exception as e:  # noqa: BLE001  # keep loop alive on any per-day error
+                counts["failed"] += 1
+                console.print(f"  [red]error[/red] NSE {d}: {type(e).__name__}: {e}")
+            progress.update(task, advance=1)
+
+    summary = Table(title="delivery backfill summary", border_style="cyan")
+    summary.add_column("Exchange", style="bold")
+    summary.add_column("Written", justify="right", style="green")
+    summary.add_column("Skipped", justify="right", style="yellow")
+    summary.add_column("Failed", justify="right", style="red")
+    summary.add_row("NSE", str(counts["ok"]), str(counts["skipped"]), str(counts["failed"]))
+    console.print(summary)
 
 
 actions_app = typer.Typer(
@@ -1571,6 +1694,14 @@ def compact(
         str,
         typer.Option("--bucket", help="R2 bucket name (only used with --from-r2)"),
     ] = DEFAULT_R2_BUCKET,
+    prefix: Annotated[
+        str,
+        typer.Option(
+            "--prefix",
+            help="R2 key prefix of DATA_DIR (only used with --from-r2), "
+            "e.g. `delivery` with `--data-dir data/out/delivery`",
+        ),
+    ] = "",
     refresh: Annotated[
         bool,
         typer.Option(
@@ -1587,7 +1718,8 @@ def compact(
     `<data-dir>/<ex>/year=YYYY/<ex>_<YYYY>.parquet`, then optionally deletes
     the daily files. Run this once at the start of each new year for the
     just-closed year, to cut R2 LIST overhead for long-range queries.
-    Idempotent: skips if the rollup already exists.
+    Idempotent: skips if the rollup already exists. `--prefix` points
+    `--from-r2` at a tree below the bucket root, such as `delivery/`.
     """
     _banner()
     table = Table(title=f"compact year={year}", border_style="cyan")
@@ -1612,7 +1744,7 @@ def compact(
 
         if from_r2:
             paths_to_read, n_sources, cleanup = _fetch_year_dailies_from_r2(
-                bucket=bucket, exchange=ex, year=year
+                bucket=bucket, exchange=ex, year=year, prefix=prefix
             )
         else:
             if not year_dir.exists():
@@ -1670,7 +1802,7 @@ def compact(
 
 
 def _fetch_year_dailies_from_r2(
-    bucket: str, exchange: str, year: int,
+    bucket: str, exchange: str, year: int, prefix: str = "",
 ) -> tuple[list[str], int, Any]:
     """Download every bhavcopy key for one year + exchange to a temp dir.
 
@@ -1691,6 +1823,8 @@ def _fetch_year_dailies_from_r2(
 
     s3 = _build_client(None, None, None)
     year_prefix = f"{exchange.lower()}/year={year}/"
+    if prefix:
+        year_prefix = f"{prefix.strip('/')}/{year_prefix}"
     keys: list[str] = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=year_prefix):
@@ -1778,6 +1912,33 @@ def _date_from_path(p: Path) -> date:
     # date=YYYY-MM-DD.parquet → YYYY-MM-DD
     stem = p.stem  # "date=2025-04-30"
     return _parse_date(stem.split("=", 1)[1])
+
+
+def _dates_on_disk(root: Path) -> set[date]:
+    """Dates under a partitioned tree: daily file names plus the rows of year rollups."""
+    if not root.exists():
+        return set()
+    have = {_date_from_path(p) for p in root.rglob("date=*.parquet")}
+    # Rollups sit directly in year=YYYY/; dailies one level down in month=MM/.
+    for p in root.rglob("year=*/*.parquet"):
+        have.update(pl.read_parquet(p, columns=["date"])["date"].to_list())
+    return have
+
+
+def _nse_days(start: date, end: date) -> list[date]:
+    """NSE sessions in [start, end], and every weekday past the calendar's last session.
+
+    exchange_calendars ships XBOM a year at a time and raises past its last
+    session (2026-12-31 in 4.13.2). A weekday that was a holiday just 404s.
+    """
+    last = holidays._calendar("NSE").last_session.date()
+    days = holidays.trading_days_between(start, min(end, last), "NSE") if start <= last else []
+    d = max(start, last + timedelta(days=1))
+    while d <= end:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
 
 
 def _year_from_actions_filename(p: Path) -> int | None:
