@@ -1518,7 +1518,7 @@ requires-dist = [
     { name = "curl-cffi", specifier = ">=0.7" },
     { name = "exchange-calendars", specifier = ">=4.5" },
     { name = "huggingface-hub", specifier = ">=0.24" },
-    { name = "polars", specifier = ">=1.0" },
+    { name = "polars", specifier = ">=1.21" },
     { name = "pyarrow", specifier = ">=16.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
