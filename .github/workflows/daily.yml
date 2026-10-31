@@ -39,15 +39,18 @@ concurrency:
   group: daily-bhavcopy
   cancel-in-progress: false
 
-# Two jobs on purpose:
+# Three jobs on purpose:
 #   prices  - sweep the recent trading days, fold into the year rollup,
 #             publish. Core product. Green means every session that was due
 #             is either published or newly fetched, which is not the same as
 #             "the job ran": see the session check in the prices job.
 #   derived - corp actions, symbol history, adjusted prices, metrics.
 #             Rebuilt from full history, published from its own dir.
-# A derived failure never blocks prices, but it DOES fail the run so
-# GitHub emails on it. No continue-on-error anywhere except the flaky
+#   delivery - NSE delivery positions over the same sweep, into
+#             delivery/nse/. A late file is a warning; one still missing
+#             three trading days on fails the run.
+# A derived or delivery failure never blocks prices, but it DOES fail the
+# run so GitHub emails on it. No continue-on-error anywhere except the flaky
 # NSE corp-actions website fetch, which falls back to the actions
 # history already on R2.
 
@@ -63,6 +66,9 @@ jobs:
       year: ${{ steps.traded.outputs.year }}
       traded: ${{ steps.traded.outputs.value }}
       published_at: ${{ steps.status.outputs.published_at }}
+      # The sweep range, so the delivery job covers the same days.
+      from: ${{ steps.range.outputs.from }}
+      to: ${{ steps.range.outputs.to }}
     steps:
       - uses: actions/checkout@v7
 
@@ -447,10 +453,101 @@ jobs:
             echo '```'; find data/derived -name "*.parquet" 2>/dev/null | sort; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  delivery:
+    # Delivery quantity and % per security from NSE's MTO file, published as
+    # delivery/nse/ and joined to nse/ on (date, symbol, series). Its own job
+    # so a late or broken file never holds up prices or derived, and it still
+    # runs when prices failed. MTO lands ~16:30 to 17:00 IST; a missing one
+    # is skipped, so the next run's sweep fetches it.
+    needs: prices
+    if: ${{ !cancelled() && needs.prices.outputs.from != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: '3.11'
+          enable-cache: false
+          activate-environment: true
+
+      - name: Install pipeline
+        run: uv sync --locked
+
+      - name: Pull the delivery rollups already published
+        # So the check at the end counts a day already on R2 as present, and
+        # one flaky re-fetch of an older day does not fail the run.
+        run: |
+          FROM="${{ needs.prices.outputs.from }}"
+          TO="${{ needs.prices.outputs.to }}"
+          for YEAR in $(seq "${FROM%%-*}" "${TO%%-*}"); do
+            tej-bazaar pull-r2 --prefix "delivery/nse/year=$YEAR/" \
+              --data-dir data/out --bucket tej-bazaar
+          done
+
+      - name: Fetch NSE delivery
+        # Holidays and files not published yet are skipped, never fatal.
+        # One second between downloads keeps the sweep polite to NSE.
+        id: fetched
+        run: |
+          tej-bazaar delivery backfill \
+            --from "${{ needs.prices.outputs.from }}" \
+            --to "${{ needs.prices.outputs.to }}" \
+            --out-dir data/out/delivery
+          YEARS=$(find data/out/delivery -name 'date=*.parquet' \
+            | sed -n 's|.*/year=\([0-9]\{4\}\)/.*|\1|p' | sort -u | tr '\n' ' ')
+          echo "years=$YEARS" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh the delivery year rollups on R2
+        # Same fold as prices: publish the dailies, rebuild each touched year
+        # rollup from R2, publish it, then prune the daily keys and files.
+        if: steps.fetched.outputs.years != ''
+        run: |
+          tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
+          for YEAR in ${{ steps.fetched.outputs.years }}; do
+            tej-bazaar compact --year "$YEAR" --exchange NSE \
+              --data-dir data/out/delivery --prefix delivery \
+              --from-r2 --refresh --bucket tej-bazaar
+          done
+          tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
+          for YEAR in ${{ steps.fetched.outputs.years }}; do
+            tej-bazaar r2-prune --prefix "delivery/nse/year=$YEAR/month=" \
+              --bucket tej-bazaar --yes
+            rm -rf data/out/delivery/nse/year="$YEAR"/month=*
+          done
+
+      - name: Publish delivery to HF
+        if: steps.fetched.outputs.years != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          tej-bazaar publish \
+            --repo tejhq/indian-markets \
+            --data-dir data/out \
+            --delete-pattern "delivery/*/year=*/month=*" \
+            -m "daily: NSE delivery to ${{ needs.prices.outputs.to }}"
+
+      - name: Delivery may lag, but not by three trading days
+        # A session missing past 18:00 IST is a ::warning:: only. Still
+        # missing at 18:00 IST three trading days on, it fails the run.
+        run: |
+          tej-bazaar check-sessions \
+            --from "${{ needs.prices.outputs.from }}" \
+            --to "${{ needs.prices.outputs.to }}" \
+            --prices-dir data/out/delivery \
+            --due-hour 18 \
+            --grace 3
+
   alert:
     # Optional webhook (Discord/Slack-compatible JSON). GitHub already emails
     # the workflow's last committer on scheduled-run failure; this is extra.
-    needs: [prices, derived]
+    needs: [prices, derived, delivery]
     if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -463,5 +560,5 @@ jobs:
             echo "ALERT_WEBHOOK_URL not set; skipping webhook"; exit 0
           fi
           curl -fsS -X POST -H 'Content-Type: application/json' "$WEBHOOK" -d @- <<JSON
-          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} delivery=${{ needs.delivery.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
           JSON

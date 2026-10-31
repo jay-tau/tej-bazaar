@@ -37,11 +37,13 @@ configs:
     data_files: "metrics/*_????.parquet"
   - config_name: universe
     data_files: "universe/*_liquid.parquet"
+  - config_name: delivery_nse
+    data_files: "delivery/nse/year=*/nse_*.parquet"
 ---
 
 # tejhq/indian-markets
 
-End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Six parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, and a survivorship-bias-free liquidity universe. Refreshed every trading day by an open pipeline.
+End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Seven parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, a survivorship-bias-free liquidity universe, and NSE delivery quantity and delivery %. Refreshed every trading day by an open pipeline.
 
 No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](https://api.tejhq.dev) and mirrored on Cloudflare R2.
 
@@ -58,7 +60,7 @@ Derived trees are computed per instrument chain, not per raw ISIN: when a face v
 
 Pre-2012 NSE rows carry no `isin` and no `trades` because the source never had them. They are null in the raw tree rather than invented. The derived trees backfill the ISIN for symbols that traded continuously across the 2012 cutover so corporate actions and rolling windows apply back to 2010; symbols that did not survive the cutover stay ISIN-less and are windowed by symbol.
 
-## The six trees
+## The seven trees
 
 Pick a config in the viewer above to browse each one.
 
@@ -151,6 +153,19 @@ One file per exchange: `universe/<ex>_liquid.parquet`. On the first trading day 
 | `avg_turnover_63d` | float64 | Trailing mean turnover, INR |
 
 `liquid100`, `liquid250` and `liquid500` are `rank <= N` filters over the same rows.
+
+### 7. `delivery/nse/`: delivery quantity and delivery %
+
+One rollup per year, `delivery/nse/year=YYYY/nse_YYYY.parquet`, from NSE's security-wise delivery position file, 2010 onwards. No ISIN in the source; join to `nse/` on `(date, symbol, series)`. `EQ` rows only: the source has no `BE`/`BZ` rows, which settle entirely by delivery.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `date` | date | Trading date |
+| `symbol` | string | Ticker |
+| `series` | string | `EQ` |
+| `volume` | int64 | Quantity traded; equals `volume` in `nse/` |
+| `delivery_qty` | int64 | Deliverable quantity |
+| `delivery_pct` | float64 | `delivery_qty / volume` in percent, as NSE publishes it |
 
 ## Quickstart
 

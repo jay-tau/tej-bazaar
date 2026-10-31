@@ -1,6 +1,6 @@
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -9,6 +9,8 @@ from typer.testing import CliRunner
 from pipeline import __version__
 from pipeline.actions import ACTION_SCHEMA, CorporateAction
 from pipeline.cli import app
+from pipeline.fetch import BhavcopyNotFoundError
+from pipeline.push import partition_path
 
 runner = CliRunner()
 
@@ -882,3 +884,188 @@ def test_check_sessions_still_fails_on_the_day_past_what_is_published(tmp_path: 
     )
     assert result.exit_code == 1
     assert "missing past due: 2026-09-25" in result.stdout
+
+
+def test_check_sessions_grace_warns_then_fails(tmp_path: Path):
+    # Delivery for Monday 26 October never arrived. With three trading days of
+    # grace it only warns until Thursday's due hour, then fails the run.
+    args = ["check-sessions", "--from", "2026-10-26", "--to", "2026-10-26",
+            "--prices-dir", str(tmp_path), "--grace", "3"]
+    warned = runner.invoke(app, [*args, "--now", "2026-10-29T19:59"])
+    assert warned.exit_code == 0, warned.stdout
+    assert "::warning::2026-10-26 missing" in warned.stdout
+    assert "20:00 IST on 2026-10-29" in warned.stdout
+
+    failed = runner.invoke(app, [*args, "--now", "2026-10-29T20:00"])
+    assert failed.exit_code == 1
+    assert "missing past due: 2026-10-26" in failed.stdout
+
+
+def test_check_sessions_grace_counts_trading_days(tmp_path: Path):
+    # 1 October 2026 is a Thursday; the 2nd is a holiday and the 3rd and 4th a
+    # weekend, so its third trading day after is Wednesday the 7th.
+    args = ["check-sessions", "--from", "2026-10-01", "--to", "2026-10-01",
+            "--prices-dir", str(tmp_path), "--grace", "3"]
+    assert runner.invoke(app, [*args, "--now", "2026-10-07T19:00"]).exit_code == 0
+    assert runner.invoke(app, [*args, "--now", "2026-10-07T20:00"]).exit_code == 1
+
+
+def test_check_sessions_grace_runs_past_the_calendar(tmp_path: Path):
+    # XBOM ends on 2026-12-31, so the third trading day after the 29th is
+    # counted on weekdays: Friday 1 January 2027.
+    args = ["check-sessions", "--from", "2026-12-29", "--to", "2026-12-29",
+            "--prices-dir", str(tmp_path), "--grace", "3"]
+    warned = runner.invoke(app, [*args, "--now", "2026-12-31T21:30"])
+    assert warned.exit_code == 0, warned.stdout
+    assert "20:00 IST on 2027-01-01" in warned.stdout
+    assert runner.invoke(app, [*args, "--now", "2027-01-01T20:00"]).exit_code == 1
+
+
+def test_check_sessions_counts_days_inside_a_year_rollup(tmp_path: Path):
+    # The delivery job checks against the published year rollup, which holds
+    # many days and has no date= file per day.
+    p = tmp_path / "nse" / "year=2026" / "nse_2026.parquet"
+    p.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {"symbol": ["RELIANCE", "RELIANCE"], "date": [date(2026, 10, 26), date(2026, 10, 27)]}
+    ).write_parquet(p)
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-10-26", "--to", "2026-10-27",
+         "--prices-dir", str(tmp_path), "--now", "2026-10-30T09:00"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "every due session is present" in result.stdout
+
+
+# --- delivery subcommand -----------------------------------------------
+
+MTO_FIXTURE = Path(__file__).parent / "fixtures" / "nse_mto_20261028_sample.DAT"
+
+
+def test_delivery_backfill_writes_skips_and_keeps_going(tmp_path: Path):
+    # The 27th is not published (404), the 28th is good, and the 29th serves
+    # the 28th's file, which the date check rejects. None of it stops the loop.
+    def fake_fetch(d, dest_dir):
+        if d == date(2026, 10, 27):
+            raise BhavcopyNotFoundError("bhavcopy not found (404)")
+        return MTO_FIXTURE
+
+    out = tmp_path / "delivery"
+    with patch("pipeline.cli.fetch_nse_delivery", side_effect=fake_fetch), \
+         patch("pipeline.cli.time.sleep") as sleep:
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--from", "2026-10-27", "--to", "2026-10-29",
+             "--raw-dir", str(tmp_path / "raw"), "--out-dir", str(out), "--sleep", "1.5"],
+        )
+
+    assert result.exit_code == 0, result.stdout
+    written = partition_path(out, "NSE", date(2026, 10, 28))
+    assert pl.read_parquet(written).height == 5
+    assert not partition_path(out, "NSE", date(2026, 10, 27)).exists()
+    assert not partition_path(out, "NSE", date(2026, 10, 29)).exists()
+    assert "missing NSE 2026-10-27" in result.stdout
+    assert "DeliveryParseError" in result.stdout
+    # One pause between each pair of downloads, none before the first.
+    assert [c.args for c in sleep.call_args_list] == [(1.5,), (1.5,)]
+
+
+def test_delivery_backfill_skips_written_days_without_a_request(tmp_path: Path):
+    out = tmp_path / "delivery"
+    existing = partition_path(out, "NSE", date(2026, 10, 28))
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"already here")
+    with patch("pipeline.cli.fetch_nse_delivery") as fetch, \
+         patch("pipeline.cli.time.sleep") as sleep:
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--from", "2026-10-28", "--to", "2026-10-28",
+             "--out-dir", str(out)],
+        )
+    assert result.exit_code == 0, result.stdout
+    fetch.assert_not_called()
+    sleep.assert_not_called()
+
+
+def _fetched_days(tmp_path: Path, *args: str) -> list[date]:
+    with patch("pipeline.cli.fetch_nse_delivery",
+               side_effect=BhavcopyNotFoundError("not found")) as fetch, \
+         patch("pipeline.cli.time.sleep"):
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", *args, "--raw-dir", str(tmp_path / "raw"),
+             "--out-dir", str(tmp_path / "delivery")],
+        )
+    assert result.exit_code == 0, result.stdout
+    return [c.args[0] for c in fetch.call_args_list]
+
+
+def test_delivery_backfill_adds_the_sessions_nse_has(tmp_path: Path):
+    # Saturday 2024-01-20 traded and is in nse/, but the calendar misses it.
+    p = tmp_path / "prices" / "nse" / "year=2024" / "nse_2024.parquet"
+    p.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["RELIANCE"], "date": [date(2024, 1, 20)]}).write_parquet(p)
+    days = _fetched_days(tmp_path, "--from", "2024-01-19", "--to", "2024-01-23",
+                         "--prices-dir", str(tmp_path / "prices"))
+    # The 22nd was a holiday, the reason for the Saturday session.
+    assert days == [date(2024, 1, 19), date(2024, 1, 20), date(2024, 1, 23)]
+
+
+def test_delivery_backfill_runs_past_the_calendar(tmp_path: Path):
+    # XBOM ends on 2026-12-31; after it every weekday is tried.
+    days = _fetched_days(tmp_path, "--from", "2026-12-31", "--to", "2027-01-05")
+    assert days == [date(2026, 12, 31), date(2027, 1, 1), date(2027, 1, 4), date(2027, 1, 5)]
+
+
+def test_delivery_backfill_inverted_range_rejected():
+    result = runner.invoke(
+        app, ["delivery", "backfill", "--from", "2026-10-28", "--to", "2026-10-01"]
+    )
+    assert result.exit_code != 0
+    assert "--to must be on or after --from" in result.output
+
+
+@pytest.mark.parametrize("cached_days", [[27, 28, 29], [28]])
+def test_delivery_backfill_sleeps_only_between_downloads(tmp_path: Path, cached_days: list[int]):
+    raw = tmp_path / "raw" / "nse"
+    raw.mkdir(parents=True)
+    for day in cached_days:
+        (raw / f"MTO_{day}102026.DAT").write_bytes(
+            MTO_FIXTURE.read_bytes().replace(b"28102026", f"{day}102026".encode())
+        )
+
+    def download(url, *args):
+        return MTO_FIXTURE.read_bytes().replace(b"28102026", url[-12:-4].encode())
+
+    out = tmp_path / "delivery"
+    with patch("pipeline.delivery._http_get_with_retry", side_effect=download) as fetch, \
+         patch("pipeline.cli.time.sleep") as sleep:
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--from", "2026-10-27", "--to", "2026-10-29",
+             "--raw-dir", str(raw.parent), "--out-dir", str(out)],
+        )
+    assert result.exit_code == 0, result.stdout
+    assert fetch.call_count == 3 - len(cached_days)
+    assert [c.args for c in sleep.call_args_list] == [(1.0,)] * max(0, fetch.call_count - 1)
+    assert len(list(out.rglob("date=*.parquet"))) == 3
+
+
+@pytest.mark.parametrize(
+    ("extra", "listed"),
+    [([], "nse/year=2026/"), (["--prefix", "delivery"], "delivery/nse/year=2026/")],
+)
+def test_compact_from_r2_lists_under_the_prefix(tmp_path: Path, extra: list[str], listed: str):
+    s3 = MagicMock()
+    s3.get_paginator.return_value.paginate.return_value = [{"Contents": []}]
+    with patch("pipeline.publish_r2._build_client", return_value=s3):
+        result = runner.invoke(
+            app,
+            ["compact", "--year", "2026", "--exchange", "NSE", "--data-dir", str(tmp_path),
+             "--from-r2", *extra],
+        )
+    assert result.exit_code == 0, result.stdout
+    s3.get_paginator.return_value.paginate.assert_called_once_with(
+        Bucket="tej-bazaar", Prefix=listed
+    )
