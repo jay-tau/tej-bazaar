@@ -119,7 +119,52 @@ adjusted-close layer alongside raw.
 
 - [x] Hand off serving to `tej-api` (REST + auth tiers) in a separate repo, live at `api.tejhq.dev`
 - [x] `tej-sdk-py`: thin Python client over the API, published as `tejhq` 0.3.0 on PyPI
-- [ ] `tej-sdk-ts`: TypeScript client, built (0.1.0, same surface as the Python SDK), not yet published to npm
+- [x] `tej-sdk-ts`: TypeScript client, published as `tejhq` 0.1.0 on npm
+
+## Phase 7 - EOD F&O (NEXT, TOP PRIORITY)
+
+Daily NSE derivatives bhavcopy: one row per contract per day (futures and options on indices and stocks). Same public archive and legal footing as the equity bhavcopy. Not tick or intraday data.
+
+- [ ] Fetcher, two formats (verify URLs against live archive first):
+  - Legacy: `archives.nseindia.com/content/historical/DERIVATIVES/{yyyy}/{MMM}/fo{dd}{MMM}{yyyy}bhav.csv.zip` (INSTRUMENT, SYMBOL, EXPIRY_DT, STRIKE_PR, OPTION_TYP, OHLC, SETTLE_PR, CONTRACTS, VAL_INLAKH, OPEN_INT, CHG_IN_OI)
+  - UDiFF from 2024-07-08: `nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{yyyymmdd}_F_0000.csv.zip`
+- [ ] Parser to one schema: date, instrument (FUTIDX/FUTSTK/OPTIDX/OPTSTK), symbol, expiry, strike, option_type (CE/PE/null), open, high, low, close, settle, contracts, lot_size, turnover, open_interest, oi_change, underlying_close
+- [ ] Cross-format check: overlap days around the cutover parse to identical rows
+- [ ] Lot size per contract (UDiFF has it; legacy needs NSE lot-size circulars or contracts vs quantity)
+- [ ] Output `fo/year=YYYY/` parquet, sorted by symbol, expiry, strike for pruning. Est. 50k to 100k rows/day, a few GB for full history
+- [ ] Backfill from 2010 (local, user-run), then wire into `prices` cron job; warn on missing file, fail after 3 trading days
+- [ ] Publish to R2 and HF `tejhq/indian-markets` under `fo/`
+- [ ] Serving in tej-api (paid tiers): `/v1/fo/chain/{symbol}?date=&expiry=`, `/v1/fo/futures/{symbol}`, `/v1/fo/contract` history
+- [ ] Later: derived PCR, max pain, OI buildup, continuous futures with roll
+- Out of scope: tick and 1-minute data (no public source, NSE sells it)
+
+## Phase 8 - MCP server (after F&O)
+
+Remote MCP server so Claude, ChatGPT, Cursor and agent frameworks can query TejHQ directly. AI assistants are already the top signup source.
+
+- [ ] Thin wrapper over existing tej-api endpoints, lives in tej-api or its own repo, not here
+- [ ] Tools: ohlcv, adjusted, snapshot, actions, symbols/resolve, universe, status (F&O chain once Phase 7 ships)
+- [ ] Auth with the user's API key, same tier limits and quotas
+- [ ] Remote (streamable HTTP) at `mcp.tejhq.dev`, plus listing in MCP registries
+- [ ] Docs page and llms.txt entry
+
+## Phase 9 - Regulatory filings
+
+Public exchange and SEBI disclosures as plain ISIN-keyed tables. No graph database.
+
+- [ ] Bulk and block deals: NSE daily files, easiest first
+- [ ] Insider trading disclosures (SEBI PIT)
+- [ ] Promoter pledges (SAST disclosures)
+- [ ] Quarterly shareholding pattern (promoter, FII, DII, MF, public)
+- [ ] `filings/` parquet trees, published to R2 and HF; paid-tier endpoints in tej-api
+
+## Phase 10 - Market breadth
+
+Daily market internals computed from existing bhavcopy data. Free and SEO-facing, not a paid product.
+
+- [ ] Advance/decline, new 52-week highs/lows, % above 50/200 DMA, turnover concentration
+- [ ] Per exchange and per liquidity universe (liquid100/250/500)
+- [ ] `breadth/` parquet, keyless endpoint, public page on tejhq.dev
 
 ---
 
